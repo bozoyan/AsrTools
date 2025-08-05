@@ -13,11 +13,15 @@ os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
 from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSize, QThread, \
     pyqtSignal
 from PyQt5.QtGui import QCursor, QColor, QFont
+import requests
+from datetime import datetime
+import json
+
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
                              QTableWidgetItem, QHeaderView, QSizePolicy)
 from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentIcon as FIF,
                             Action, RoundMenu, InfoBar, InfoBarPosition,
-                            FluentWindow, BodyLabel, MessageBox)
+                            FluentWindow, BodyLabel, MessageBox, TextEdit, Dialog)
 
 from bk_asr.BcutASR import BcutASR
 from bk_asr.JianYingASR import JianYingASR
@@ -465,6 +469,215 @@ class SrtOptimizerWorker(QRunnable):
             self.signals.errno.emit(self.srt_path, f"优化时出错: {str(e)}")
 
 
+class TTSWorker(QRunnable):
+    """TTS处理工作线程"""
+
+    def __init__(self, text, ref_audio_path, prompt_text, prompt_lang):
+        super().__init__()
+        self.text = text
+        self.ref_audio_path = ref_audio_path
+        self.prompt_text = prompt_text
+        self.prompt_lang = prompt_lang
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self):
+        try:
+            output_dir = Path("output")
+            output_dir.mkdir(exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{timestamp}.wav"
+            save_path = output_dir / filename
+
+            url = "http://127.0.0.1:9880/tts"
+            params = {
+                "text": self.text,
+                "text_lang": "zh",
+                "ref_audio_path": self.ref_audio_path,
+                "prompt_text": self.prompt_text,
+                "prompt_lang": self.prompt_lang,
+            }
+            logging.info(f"[+]正在请求TTS API: {url} with params: {params}")
+            response = requests.get(url, params=params, stream=True)
+
+            if response.status_code == 200:
+                with open(save_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=1024):
+                        f.write(chunk)
+                logging.info(f"[+]音频文件已保存到: {save_path}")
+                self.signals.finished.emit(str(save_path), self.text)
+            else:
+                error_msg = f"API请求失败，状态码: {response.status_code}, 内容: {response.text}"
+                logging.error(error_msg)
+                self.signals.errno.emit("API_ERROR", error_msg)
+
+        except requests.exceptions.RequestException as e:
+            error_msg = f"调用TTS API时网络错误: {e}"
+            logging.error(error_msg)
+            self.signals.errno.emit("NETWORK_ERROR", error_msg)
+        except Exception as e:
+            error_msg = f"处理TTS时发生未知错误: {e}"
+            logging.error(error_msg)
+            self.signals.errno.emit("UNKNOWN_ERROR", error_msg)
+
+
+class VoiceApiWidget(QWidget):
+    """声音API生成界面"""
+    HISTORY_FILE = Path("gpt_sovits_history.json")
+
+    def __init__(self):
+        super().__init__()
+        self.init_ui()
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(1)  # 同时只处理一个生成任务
+        self.history = []
+        self.load_history()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # 多行文本输入框
+        self.text_input = TextEdit(self)
+        self.text_input.setPlaceholderText("在此输入需要合成语音的文本...")
+        self.text_input.setFixedHeight(150)
+        layout.addWidget(self.text_input)
+
+        # 历史记录表格
+        history_label = BodyLabel("历史记录:", self)
+        layout.addWidget(history_label)
+        self.history_table = TableWidget(self)
+        self.history_table.setColumnCount(3)
+        self.history_table.setHorizontalHeaderLabels(['文本', '文件名', '操作'])
+        self.history_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.history_table.customContextMenuRequested.connect(self.show_context_menu)
+        header = self.history_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.history_table.setWordWrap(True)
+        layout.addWidget(self.history_table)
+
+        # 声音生成按钮
+        self.generate_button = PushButton("生成声音", self)
+        self.generate_button.clicked.connect(self.generate_voice)
+        layout.addWidget(self.generate_button)
+
+    def load_history(self):
+        if self.HISTORY_FILE.exists():
+            try:
+                with open(self.HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    self.history = json.load(f)
+                for item in self.history:
+                    self.add_history_item_to_table(item['text'], item['filename'])
+            except (IOError, json.JSONDecodeError) as e:
+                logging.error(f"加载历史记录失败: {e}")
+                self.history = []
+
+    def save_history(self):
+        try:
+            with open(self.HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.history, f, ensure_ascii=False, indent=4)
+        except IOError as e:
+            logging.error(f"保存历史记录失败: {e}")
+
+    def add_history_item_to_table(self, text, filename):
+        row_count = self.history_table.rowCount()
+        self.history_table.insertRow(row_count)
+
+        # 文本
+        text_item = QTableWidgetItem(text)
+        text_item.setFlags(text_item.flags() & ~Qt.ItemIsEditable)
+        self.history_table.setItem(row_count, 0, text_item)
+
+        # 文件名
+        filename_item = QTableWidgetItem(os.path.basename(filename))
+        filename_item.setFlags(filename_item.flags() & ~Qt.ItemIsEditable)
+        self.history_table.setItem(row_count, 1, filename_item)
+        filename_item.setData(Qt.UserRole, filename) # 存储完整路径
+
+        # 播放按钮
+        play_button = PushButton(FIF.PLAY, "播放")
+        play_button.clicked.connect(lambda _, r=row_count: self.play_audio(r))
+        self.history_table.setCellWidget(row_count, 2, play_button)
+        self.history_table.resizeRowsToContents()
+
+    def play_audio(self, row):
+        filename = self.history_table.item(row, 1).data(Qt.UserRole)
+        if os.path.exists(filename):
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(filename)
+                elif platform.system() == "Darwin": # macOS
+                    subprocess.Popen(["open", filename])
+                else: # linux
+                    subprocess.Popen(["xdg-open", filename])
+            except Exception as e:
+                InfoBar.error('播放失败', f'无法播放文件: {e}', parent=self)
+        else:
+            InfoBar.warning('文件不存在', f'音频文件 {filename} 不存在。', parent=self)
+
+    def generate_voice(self):
+        text = self.text_input.toPlainText().strip()
+        if not text:
+            InfoBar.warning('内容为空', '请输入需要合成的文本。', parent=self)
+            return
+
+        # TODO: 让用户可以自定义这些参数
+        ref_audio_path = "./output/slicer_opt/F2024.wav"
+        prompt_text = "人家补课补来补去的也就上了个鉴湖，他什么都不补课也能上鉴湖。"
+        prompt_lang = "zh"
+
+        if not Path(ref_audio_path).exists():
+            d = Dialog('参考音频不存在', f'参考音频文件不存在，请检查路径：{ref_audio_path}', self)
+            d.exec()
+            return
+
+        self.generate_button.setText("生成中...")
+        self.generate_button.setEnabled(False)
+
+        worker = TTSWorker(text, ref_audio_path, prompt_text, prompt_lang)
+        worker.signals.finished.connect(self.on_generation_finished)
+        worker.signals.errno.connect(self.on_generation_error)
+        self.thread_pool.start(worker)
+
+    def on_generation_finished(self, save_path, text):
+        InfoBar.success('生成成功', f'音频文件已保存到 {save_path}', parent=self)
+        self.generate_button.setText("生成声音")
+        self.generate_button.setEnabled(True)
+
+        new_history_item = {'text': text, 'filename': save_path}
+        self.history.insert(0, new_history_item)  # 插入到最前面
+        self.save_history()
+
+        # 刷新表格显示
+        self.history_table.setRowCount(0)
+        for item in self.history:
+            self.add_history_item_to_table(item['text'], item['filename'])
+
+    def on_generation_error(self, error_type, error_message):
+        InfoBar.error('生成失败', error_message, parent=self)
+        self.generate_button.setText("生成声音")
+        self.generate_button.setEnabled(True)
+
+    def show_context_menu(self, pos):
+        row = self.history_table.rowAt(pos.y())
+        if row < 0:
+            return
+
+        menu = RoundMenu(parent=self)
+        delete_action = Action(FIF.DELETE, '删除此条记录')
+        menu.addAction(delete_action)
+
+        delete_action.triggered.connect(lambda: self.delete_history_item(row))
+        menu.exec(QCursor.pos())
+
+    def delete_history_item(self, row):
+        self.history_table.removeRow(row)
+        del self.history[row]
+        self.save_history()
+        InfoBar.success('已删除', '该条历史记录已删除。', parent=self)
+
+
 class SrtOptimizerWidget(QWidget):
     """SRT优化界面"""
     def __init__(self):
@@ -618,7 +831,7 @@ class InfoWidget(QWidget):
         # main_layout.setSpacing(50)
 
         # 标题
-        title_label = BodyLabel("  ASRTools", self)
+        title_label = BodyLabel("  ASRTools v1.2.0", self)
         title_label.setFont(QFont("Segoe UI", 30, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
@@ -628,7 +841,7 @@ class InfoWidget(QWidget):
         desc_label.setFont(QFont("Segoe UI", 12))
         main_layout.addWidget(desc_label)
 
-        github_button = PushButton("GitHub 仓库", self)
+        github_button = PushButton("GitHub 仓库 https://github.com/bozoyan/AsrTools ", self)
         github_button.setIcon(FIF.GITHUB)
         github_button.setIconSize(QSize(20, 20))
         github_button.setMinimumHeight(42)
@@ -640,22 +853,29 @@ class MainWindow(FluentWindow):
     """主窗口"""
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('ASR Processing Tool')
+        self.setWindowTitle('ASR 字幕与音频处理工具')
 
         # ASR 处理界面
         self.asr_widget = ASRWidget()
         self.asr_widget.setObjectName("main")
-        self.addSubInterface(self.asr_widget, FIF.ALBUM, 'ASR Processing')
+        self.addSubInterface(self.asr_widget, FIF.ALBUM, 'ASR 字幕')
 
         # SRT 优化界面
         self.srt_optimizer_widget = SrtOptimizerWidget()
         self.srt_optimizer_widget.setObjectName("srt_optimizer")
         self.addSubInterface(self.srt_optimizer_widget, FIF.SYNC, 'SRT 优化')
 
+        # 声音生成界面
+        self.voice_api_widget = VoiceApiWidget()
+        self.voice_api_widget.setObjectName("voice_api")
+        self.addSubInterface(self.voice_api_widget, FIF.SEND, '声音生成')
+
+        self.navigationInterface.addSeparator()
+
         # 个人信息界面
         self.info_widget = InfoWidget()
         self.info_widget.setObjectName("info")  # 设置对象名称
-        self.addSubInterface(self.info_widget, FIF.GITHUB, 'About')
+        self.addSubInterface(self.info_widget, FIF.GITHUB, '关于开源')
 
         self.navigationInterface.setExpandWidth(200)
         self.resize(800, 600)
