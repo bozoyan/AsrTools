@@ -1,3 +1,14 @@
+# macOS 系统垃圾文件，递归忽略所有目录中的
+**/.DS_Store
+**/._*
+**/.AppleDouble
+**/.Spotlight-V100
+**/.Trashes
+**/.VolumeIcon.icns
+**/.fseventsd
+**/.TemporaryItems
+**/.DocumentRevisions-V100
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -36,6 +47,7 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
@@ -43,6 +55,8 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+cache/
+logs/
 nosetests.xml
 coverage.xml
 *.cover
