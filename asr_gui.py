@@ -623,7 +623,7 @@ class VoiceApiWidget(QWidget):
             return
 
         # TODO: 让用户可以自定义这些参数
-        ref_audio_path = "./resources/F2024.wav"
+        ref_audio_path = "./output/slicer_opt/F2024.wav"
         prompt_text = "人家补课补来补去的也就上了个鉴湖，他什么都不补课也能上鉴湖。"
         prompt_lang = "zh"
 
