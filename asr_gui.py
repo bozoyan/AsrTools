@@ -428,6 +428,174 @@ class ASRWidget(QWidget):
         self.update_start_button_state()
 
 
+class SrtOptimizerWorker(QRunnable):
+    """SRT优化工作线程"""
+    def __init__(self, srt_path, save_path):
+        super().__init__()
+        self.srt_path = srt_path
+        self.save_path = save_path
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self):
+        try:
+            logging.info(f"开始优化SRT文件: {self.srt_path}")
+            # 使用 sys.executable 确保我们用的是当前环境的 python
+            command = [
+                sys.executable, 'main.py',
+                '--srt_path', self.srt_path,
+                '--save_path', self.save_path
+            ]
+            # 在Windows上，隐藏命令行窗口
+            startupinfo = None
+            if platform.system() == "Windows":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+            result = subprocess.run(command, capture_output=True, text=True, check=True, encoding='utf-8', errors='replace', startupinfo=startupinfo)
+            
+            logging.info(f"SRT文件优化完成: {self.save_path}")
+            self.signals.finished.emit(self.srt_path, f"优化完成, 已保存到 {self.save_path}")
+        except subprocess.CalledProcessError as e:
+            error_output = e.stderr or e.stdout
+            logging.error(f"优化SRT文件 {self.srt_path} 时出错: {error_output}")
+            self.signals.errno.emit(self.srt_path, f"优化时出错: {error_output}")
+        except Exception as e:
+            logging.error(f"优化SRT文件 {self.srt_path} 时出错: {str(e)}")
+            self.signals.errno.emit(self.srt_path, f"优化时出错: {str(e)}")
+
+
+class SrtOptimizerWidget(QWidget):
+    """SRT优化界面"""
+    def __init__(self):
+        super().__init__()
+        self.init_ui()
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(1) # 只处理单个任务
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # SRT源文件选择
+        srt_path_layout = QHBoxLayout()
+        srt_path_label = BodyLabel("SRT源文件:", self)
+        srt_path_label.setFixedWidth(80)
+        self.srt_path_input = LineEdit(self)
+        self.srt_path_input.setPlaceholderText("选择或拖拽SRT文件到这里")
+        self.srt_path_input.setReadOnly(True)
+        self.srt_path_button = PushButton("选择文件", self)
+        self.srt_path_button.clicked.connect(self.select_srt_file)
+        srt_path_layout.addWidget(srt_path_label)
+        srt_path_layout.addWidget(self.srt_path_input)
+        srt_path_layout.addWidget(self.srt_path_button)
+        layout.addLayout(srt_path_layout)
+
+        # 保存路径选择
+        save_path_layout = QHBoxLayout()
+        save_path_label = BodyLabel("保存路径:", self)
+        save_path_label.setFixedWidth(80)
+        self.save_path_input = LineEdit(self)
+        self.save_path_input.setPlaceholderText("选择保存路径 (默认为源文件同目录)")
+        self.save_path_input.setReadOnly(True)
+        self.save_path_button = PushButton("选择路径", self)
+        self.save_path_button.clicked.connect(self.select_save_path)
+        save_path_layout.addWidget(save_path_label)
+        save_path_layout.addWidget(self.save_path_input)
+        save_path_layout.addWidget(self.save_path_button)
+        layout.addLayout(save_path_layout)
+
+        # 状态显示区域
+        self.status_label = BodyLabel("请选择文件开始处理", self)
+        self.status_label.setAlignment(Qt.AlignCenter)
+        font = self.status_label.font()
+        font.setPointSize(12)
+        self.status_label.setFont(font)
+        layout.addWidget(self.status_label)
+        
+        # 占位符，让按钮在底部
+        layout.addStretch()
+
+        # 处理按钮
+        self.process_button = PushButton("开始处理", self)
+        self.process_button.clicked.connect(self.process_srt)
+        self.process_button.setEnabled(False)
+        layout.addWidget(self.process_button)
+
+        self.setAcceptDrops(True)
+
+    def select_srt_file(self):
+        file, _ = QFileDialog.getOpenFileName(self, "选择SRT文件", "", "SRT Files (*.srt)")
+        if file:
+            self.srt_path_input.setText(file)
+            default_save_path = file.rsplit('.', 1)[0] + "_merged.srt"
+            self.save_path_input.setText(default_save_path)
+            self.update_process_button_state()
+
+    def select_save_path(self):
+        srt_path = self.srt_path_input.text()
+        if not srt_path:
+            # 如果没有源文件，则在用户主目录打开
+            default_dir = str(Path.home())
+        else:
+            # 否则在源文件目录打开
+            default_dir = os.path.dirname(srt_path)
+            
+        file, _ = QFileDialog.getSaveFileName(self, "选择保存路径", default_dir, "SRT Files (*.srt)")
+        if file:
+            self.save_path_input.setText(file)
+            self.update_process_button_state()
+
+    def process_srt(self):
+        srt_path = self.srt_path_input.text()
+        save_path = self.save_path_input.text()
+
+        if not srt_path or not save_path:
+            InfoBar.warning("提示", "请先选择SRT源文件和保存路径", parent=self, position=InfoBarPosition.TOP, duration=2000)
+            return
+
+        self.process_button.setEnabled(False)
+        self.status_label.setText("处理中...")
+
+        worker = SrtOptimizerWorker(srt_path, save_path)
+        worker.signals.finished.connect(self.on_processing_finished)
+        worker.signals.errno.connect(self.on_processing_error)
+        self.thread_pool.start(worker)
+
+    def on_processing_finished(self, original_path, message):
+        self.status_label.setText(message)
+        InfoBar.success("成功", message, parent=self, position=InfoBarPosition.TOP, duration=3000)
+        self.update_process_button_state()
+
+    def on_processing_error(self, original_path, error_message):
+        self.status_label.setText(f"处理失败")
+        w = MessageBox("处理失败", error_message, self)
+        w.exec()
+        self.update_process_button_state()
+
+    def update_process_button_state(self):
+        srt_path = self.srt_path_input.text()
+        save_path = self.save_path_input.text()
+        is_processing = self.status_label.text() == "处理中..."
+        self.process_button.setEnabled(bool(srt_path and save_path) and not is_processing)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if len(urls) == 1 and urls[0].toLocalFile().lower().endswith('.srt'):
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        file_path = event.mimeData().urls()[0].toLocalFile()
+        self.srt_path_input.setText(file_path)
+        default_save_path = file_path.rsplit('.', 1)[0] + "_merged.srt"
+        self.save_path_input.setText(default_save_path)
+        self.update_process_button_state()
+
+
 class InfoWidget(QWidget):
     """个人信息界面"""
 
@@ -478,6 +646,11 @@ class MainWindow(FluentWindow):
         self.asr_widget = ASRWidget()
         self.asr_widget.setObjectName("main")
         self.addSubInterface(self.asr_widget, FIF.ALBUM, 'ASR Processing')
+
+        # SRT 优化界面
+        self.srt_optimizer_widget = SrtOptimizerWidget()
+        self.srt_optimizer_widget.setObjectName("srt_optimizer")
+        self.addSubInterface(self.srt_optimizer_widget, FIF.SYNC, 'SRT 优化')
 
         # 个人信息界面
         self.info_widget = InfoWidget()
