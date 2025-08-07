@@ -831,7 +831,7 @@ class InfoWidget(QWidget):
         # main_layout.setSpacing(50)
 
         # 标题
-        title_label = BodyLabel("  ASRTools v1.2.0", self)
+        title_label = BodyLabel("  ASRTools v1.2.3", self)
         title_label.setFont(QFont("Segoe UI", 30, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
