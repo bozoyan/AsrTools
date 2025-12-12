@@ -60,7 +60,7 @@ htmlcov/
 .coverage.*
 .cache
 cache/
-logs/
+
 nosetests.xml
 coverage.xml
 *.cover

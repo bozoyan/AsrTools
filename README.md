@@ -34,6 +34,7 @@
     cd AsrTools
     conda create -n asrtools python=3.12 -y #可以单独建环境
     conda activate asrtools
+    conda install -c conda-forge pyqt #单独安装
     ```
 
 2. **安装依赖并运行**
