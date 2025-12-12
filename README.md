@@ -34,8 +34,29 @@
     cd AsrTools
     conda create -n asrtools python=3.12 -y #可以单独建环境
     conda activate asrtools
-    conda install -c conda-forge pyqt #单独安装
     ```
+
+    - conda配置文件 查找下有没这个配置文件
+    ```bash
+    cat > ~/.condarc << EOF
+channels:
+  - defaults
+show_channel_urls: true
+default_channels:
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/r
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/msys2
+custom_channels:
+  conda-forge: https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge
+EOF
+```
+
+
+- 直接安装 pyqt（自动下载，1-2 分钟）
+conda install -y pyqt
+
+
 
 2. **安装依赖并运行**
 
@@ -43,6 +64,7 @@
 
         ```bash
         pip install -r requirements.txt
+
         python asr_gui.py
         ```
 ---

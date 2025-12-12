@@ -831,7 +831,7 @@ class InfoWidget(QWidget):
         # main_layout.setSpacing(50)
 
         # 标题
-        title_label = BodyLabel("  ASRTools v1.2.3", self)
+        title_label = BodyLabel("  ASRTools v2.0.0", self)
         title_label.setFont(QFont("Segoe UI", 30, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
@@ -870,11 +870,9 @@ class MainWindow(FluentWindow):
         self.voice_api_widget.setObjectName("voice_api")
         self.addSubInterface(self.voice_api_widget, FIF.SEND, '声音生成')
 
-        self.navigationInterface.addSeparator()
-
-        # 个人信息界面
+        # 关于开源 - 移动到导航栏最下方
         self.info_widget = InfoWidget()
-        self.info_widget.setObjectName("info")  # 设置对象名称
+        self.info_widget.setObjectName("info")
         self.addSubInterface(self.info_widget, FIF.GITHUB, '关于开源')
 
         self.navigationInterface.setExpandWidth(200)
