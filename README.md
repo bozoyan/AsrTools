@@ -32,6 +32,8 @@
     ```bash
     git clone https://github.com/bozoyan/AsrTools.git
     cd AsrTools
+    conda create -n asrtools python=3.12 -y #可以单独建环境
+    conda activate asrtools
     ```
 
 2. **安装依赖并运行**

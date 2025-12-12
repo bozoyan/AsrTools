@@ -9,6 +9,9 @@
 **/.TemporaryItems
 **/.DocumentRevisions-V100
 
+yons启动.command
+启动.command
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -158,6 +161,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+venv
 
 # Spyder project settings
 .spyderproject
