@@ -5,7 +5,6 @@ cd "/Volumes/AI/AI/AsrTools"
 
 # 激活 python 环境
 source venv/bin/activate
-conda activate asrtools
 
 # 打印启动信息
 echo "AsrTools：智能语音转文字工具 启动中..."

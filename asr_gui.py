@@ -12,7 +12,7 @@ os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
 
 from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSize, QThread, \
     pyqtSignal
-from PyQt5.QtGui import QCursor, QColor, QFont
+from PyQt5.QtGui import QCursor, QColor, QFont, QIcon
 import requests
 from datetime import datetime
 import json
@@ -121,7 +121,7 @@ class UpdateCheckerThread(QThread):
                     self.msg.emit("更新", "检测到新版本，请下载最新版本。", config['update_download_url'])
                 else:
                     self.msg.emit("可更新", "检测到新版本，请下载最新版本。", config['update_download_url'])
-        except Exception as e:
+        except Exception:
             pass
 
 
@@ -469,6 +469,57 @@ class SrtOptimizerWorker(QRunnable):
             self.signals.errno.emit(self.srt_path, f"优化时出错: {str(e)}")
 
 
+class VideoFrameWorker(QRunnable):
+    """视频第一帧提取工作线程"""
+
+    def __init__(self, video_path, output_dir):
+        super().__init__()
+        self.video_path = video_path
+        self.output_dir = output_dir
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self):
+        try:
+            import os
+            import subprocess
+            from pathlib import Path
+
+            # 确保输出目录存在
+            Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+
+            # 生成输出文件名
+            video_name = os.path.splitext(os.path.basename(self.video_path))[0]
+            output_path = os.path.join(self.output_dir, f"{video_name}.jpg")
+
+            # ffmpeg命令提取第一帧
+            cmd = [
+                'ffmpeg',
+                '-i', self.video_path,
+                '-vframes', '1',
+                '-q:v', '2',
+                '-y',
+                '-ss', '00:00:00',
+                output_path
+            ]
+
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8'
+            )
+
+            if result.returncode == 0:
+                self.signals.finished.emit(self.video_path, f"成功提取: {os.path.basename(self.video_path)} -> {os.path.basename(output_path)}")
+            else:
+                self.signals.errno.emit(self.video_path, f"提取失败: {result.stderr}")
+
+        except Exception as e:
+            self.signals.errno.emit(self.video_path, f"处理出错: {str(e)}")
+
+
 class TTSWorker(QRunnable):
     """TTS处理工作线程"""
 
@@ -519,6 +570,309 @@ class TTSWorker(QRunnable):
             error_msg = f"处理TTS时发生未知错误: {e}"
             logging.error(error_msg)
             self.signals.errno.emit("UNKNOWN_ERROR", error_msg)
+
+
+class VideoFrameWidget(QWidget):
+    """视频第一帧提取界面"""
+
+    def __init__(self):
+        super().__init__()
+        self.init_ui()
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(3)  # 同时最多处理3个视频
+        self.processing_files = set()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # 源文件选择区域
+        source_layout = QHBoxLayout()
+        source_label = BodyLabel("源文件:", self)
+        source_label.setFixedWidth(70)
+        self.source_input = LineEdit(self)
+        self.source_input.setPlaceholderText("拖拽视频文件或文件夹到这里")
+        self.source_input.setReadOnly(True)
+        self.source_button = PushButton("选择文件", self)
+        self.source_button.clicked.connect(self.select_source)
+        source_layout.addWidget(source_label)
+        source_layout.addWidget(self.source_input)
+        source_layout.addWidget(self.source_button)
+        layout.addLayout(source_layout)
+
+        # 输出目录选择区域
+        output_layout = QHBoxLayout()
+        output_label = BodyLabel("输出目录:", self)
+        output_label.setFixedWidth(70)
+        self.output_input = LineEdit(self)
+        self.output_input.setPlaceholderText("选择图片保存目录")
+        self.output_input.setReadOnly(True)
+        self.output_button = PushButton("选择目录", self)
+        self.output_button.clicked.connect(self.select_output_dir)
+        output_layout.addWidget(output_label)
+        output_layout.addWidget(self.output_input)
+        output_layout.addWidget(self.output_button)
+        layout.addLayout(output_layout)
+
+        # 文件列表表格
+        table_label = BodyLabel("文件列表:", self)
+        layout.addWidget(table_label)
+        self.table = TableWidget(self)
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(['文件名', '状态'])
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        layout.addWidget(self.table)
+
+        # 设置表格列的拉伸模式
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        self.table.setColumnWidth(1, 120)
+
+        # 日志显示区域
+        log_label = BodyLabel("处理日志:", self)
+        layout.addWidget(log_label)
+        self.log_text = TextEdit(self)
+        self.log_text.setFixedHeight(150)
+        self.log_text.setReadOnly(True)
+        layout.addWidget(self.log_text)
+
+        # 处理按钮
+        self.process_button = PushButton("开始提取", self)
+        self.process_button.clicked.connect(self.process_videos)
+        self.process_button.setEnabled(False)
+        layout.addWidget(self.process_button)
+
+        self.setAcceptDrops(True)
+
+    def select_source(self):
+        """选择源文件或文件夹"""
+        # 创建一个选择对话框让用户选择文件或文件夹
+        dialog = Dialog("选择源文件类型", "请选择要添加的类型：", self)
+        dialog.yesButton.setText("选择文件")
+        dialog.cancelButton.setText("选择文件夹")
+
+        if dialog.exec():
+            # 选择文件
+            files, _ = QFileDialog.getOpenFileNames(
+                self, "选择视频文件", "",
+                "视频文件 (*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm *.ts)"
+            )
+            for file in files:
+                self.add_file_to_table(file)
+        else:
+            # 选择文件夹
+            folder = QFileDialog.getExistingDirectory(self, "选择包含视频的文件夹")
+            if folder:
+                self.add_videos_from_folder(folder)
+
+        self.update_process_button_state()
+
+    def select_output_dir(self):
+        """选择输出目录"""
+        folder = QFileDialog.getExistingDirectory(self, "选择图片保存目录")
+        if folder:
+            self.output_input.setText(folder)
+            self.update_process_button_state()
+
+    def add_videos_from_folder(self, folder):
+        """从文件夹添加所有视频文件"""
+        import os
+        video_extensions = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.ts')
+
+        for root, _, files in os.walk(folder):
+            for file in files:
+                if file.lower().endswith(video_extensions):
+                    full_path = os.path.join(root, file)
+                    self.add_file_to_table(full_path)
+
+    def add_file_to_table(self, file_path):
+        """将文件添加到表格中"""
+        if self.find_row_by_file_path(file_path) != -1:
+            InfoBar.warning(
+                title='文件已存在',
+                content=f"文件 {os.path.basename(file_path)} 已经添加到列表中。",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+                parent=self
+            )
+            return
+
+        row_count = self.table.rowCount()
+        self.table.insertRow(row_count)
+        item_filename = self.create_non_editable_item(os.path.basename(file_path))
+        item_status = self.create_non_editable_item("未处理")
+        item_status.setForeground(QColor("gray"))
+        self.table.setItem(row_count, 0, item_filename)
+        self.table.setItem(row_count, 1, item_status)
+        item_filename.setData(Qt.UserRole, file_path)
+
+    def create_non_editable_item(self, text):
+        """创建不可编辑的表格项"""
+        item = QTableWidgetItem(text)
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        return item
+
+    def show_context_menu(self, pos):
+        """显示右键菜单"""
+        current_row = self.table.rowAt(pos.y())
+        if current_row < 0:
+            return
+
+        self.table.selectRow(current_row)
+        menu = RoundMenu(parent=self)
+        delete_action = Action(FIF.DELETE, "删除任务")
+        menu.addAction(delete_action)
+        delete_action.triggered.connect(self.delete_selected_row)
+        menu.exec(QCursor.pos())
+
+    def delete_selected_row(self):
+        """删除选中的行"""
+        current_row = self.table.currentRow()
+        if current_row >= 0:
+            file_path = self.table.item(current_row, 0).data(Qt.UserRole)
+            if file_path in self.processing_files:
+                InfoBar.warning(
+                    title='正在处理',
+                    content="该文件正在处理中，无法删除。",
+                    orient=Qt.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=2000,
+                    parent=self
+                )
+                return
+            self.table.removeRow(current_row)
+            self.update_process_button_state()
+
+    def find_row_by_file_path(self, file_path):
+        """根据文件路径查找表格中的行号"""
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and item.data(Qt.UserRole) == file_path:
+                return row
+        return -1
+
+    def update_process_button_state(self):
+        """更新处理按钮状态"""
+        has_files = self.table.rowCount() > 0
+        has_output = bool(self.output_input.text())
+        self.process_button.setEnabled(has_files and has_output)
+
+    def process_videos(self):
+        """处理所有视频文件"""
+        output_dir = self.output_input.text()
+        if not output_dir:
+            InfoBar.warning("请选择输出目录", parent=self)
+            return
+
+        # 检查ffmpeg是否可用
+        try:
+            subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except FileNotFoundError:
+            InfoBar.error("FFmpeg未找到", "请先安装ffmpeg", parent=self)
+            return
+
+        for row in range(self.table.rowCount()):
+            if self.table.item(row, 1).text() == "未处理":
+                file_path = self.table.item(row, 0).data(Qt.UserRole)
+
+                # 更新状态
+                status_item = self.create_non_editable_item("处理中")
+                status_item.setForeground(QColor("orange"))
+                self.table.setItem(row, 1, status_item)
+
+                # 添加到处理集合
+                self.processing_files.add(file_path)
+
+                # 添加日志
+                self.add_log(f"开始处理: {os.path.basename(file_path)}")
+
+                # 创建工作线程
+                worker = VideoFrameWorker(file_path, output_dir)
+                worker.signals.finished.connect(self.on_processing_finished)
+                worker.signals.errno.connect(self.on_processing_error)
+                self.thread_pool.start(worker)
+
+    def on_processing_finished(self, file_path, message):
+        """处理完成回调"""
+        row = self.find_row_by_file_path(file_path)
+        if row != -1:
+            status_item = self.create_non_editable_item("已完成")
+            status_item.setForeground(QColor("green"))
+            self.table.setItem(row, 1, status_item)
+
+        # 从处理集合移除
+        self.processing_files.discard(file_path)
+
+        # 添加日志
+        self.add_log(f"✅ {message}")
+
+        InfoBar.success(
+            title='处理完成',
+            content=message,
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=2000,
+            parent=self
+        )
+
+    def on_processing_error(self, file_path, error_message):
+        """处理错误回调"""
+        row = self.find_row_by_file_path(file_path)
+        if row != -1:
+            status_item = self.create_non_editable_item("错误")
+            status_item.setForeground(QColor("red"))
+            self.table.setItem(row, 1, status_item)
+
+        # 从处理集合移除
+        self.processing_files.discard(file_path)
+
+        # 添加日志
+        self.add_log(f"❌ {os.path.basename(file_path)}: {error_message}")
+
+        InfoBar.error(
+            title='处理出错',
+            content=f"{os.path.basename(file_path)}: {error_message}",
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=3000,
+            parent=self
+        )
+
+    def add_log(self, message):
+        """添加日志消息"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.append(f"[{timestamp}] {message}")
+
+    def dragEnterEvent(self, event):
+        """拖拽进入事件"""
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        """拖拽释放事件"""
+        import os
+        video_extensions = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.ts')
+        urls = event.mimeData().urls()
+
+        for url in urls:
+            file_path = url.toLocalFile()
+            if os.path.isdir(file_path):
+                # 如果是文件夹，添加其中的所有视频文件
+                self.add_videos_from_folder(file_path)
+            elif file_path.lower().endswith(video_extensions):
+                # 如果是视频文件，直接添加
+                self.add_file_to_table(file_path)
+
+        self.update_process_button_state()
 
 
 class VoiceApiWidget(QWidget):
@@ -654,7 +1008,7 @@ class VoiceApiWidget(QWidget):
         for item in self.history:
             self.add_history_item_to_table(item['text'], item['filename'])
 
-    def on_generation_error(self, error_type, error_message):
+    def on_generation_error(self, _, error_message):
         InfoBar.error('生成失败', error_message, parent=self)
         self.generate_button.setText("生成声音")
         self.generate_button.setEnabled(True)
@@ -774,12 +1128,12 @@ class SrtOptimizerWidget(QWidget):
         worker.signals.errno.connect(self.on_processing_error)
         self.thread_pool.start(worker)
 
-    def on_processing_finished(self, original_path, message):
+    def on_processing_finished(self, _, message):
         self.status_label.setText(message)
         InfoBar.success("成功", message, parent=self, position=InfoBarPosition.TOP, duration=3000)
         self.update_process_button_state()
 
-    def on_processing_error(self, original_path, error_message):
+    def on_processing_error(self, _, error_message):
         self.status_label.setText(f"处理失败")
         w = MessageBox("处理失败", error_message, self)
         w.exec()
@@ -853,7 +1207,12 @@ class MainWindow(FluentWindow):
     """主窗口"""
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('ASR 字幕与音频处理工具')
+        self.setWindowTitle('ASR 视频+字幕+音频处理工具')
+
+        # 设置窗口图标
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.png')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         # ASR 处理界面
         self.asr_widget = ASRWidget()
@@ -864,6 +1223,11 @@ class MainWindow(FluentWindow):
         self.srt_optimizer_widget = SrtOptimizerWidget()
         self.srt_optimizer_widget.setObjectName("srt_optimizer")
         self.addSubInterface(self.srt_optimizer_widget, FIF.SYNC, 'SRT 优化')
+
+        # 视频帧提取界面
+        self.video_frame_widget = VideoFrameWidget()
+        self.video_frame_widget.setObjectName("video_frame")
+        self.addSubInterface(self.video_frame_widget, FIF.CAMERA, '视频帧提取')
 
         # 声音生成界面
         self.voice_api_widget = VoiceApiWidget()
