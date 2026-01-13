@@ -504,12 +504,12 @@ class VideoFrameWorker(QRunnable):
                 result = subprocess.run(cmd_duration, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 if result.returncode == 0:
                     total_seconds = float(result.stdout.strip())
-                    # 减去1秒作为尾帧时间
-                    seek_time = str(max(0, total_seconds - 1))
+                    # 减去1秒作为尾帧时间（保持为数值类型）
+                    seek_seconds = max(0, total_seconds - 1)
                     # 转换为 HH:MM:SS 格式
-                    hours = int(seek_time // 3600)
-                    minutes = int((seek_time % 3600) // 60)
-                    seconds = int(seek_time % 60)
+                    hours = int(seek_seconds // 3600)
+                    minutes = int((seek_seconds % 3600) // 60)
+                    seconds = int(seek_seconds % 60)
                     seek_time = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
                 else:
                     seek_time = '00:00:00'
@@ -763,6 +763,8 @@ class VideoFrameWidget(QWidget):
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(3)  # 同时最多处理3个视频
         self.processing_files = set()
+        # 初始化按钮样式
+        self.set_frame_type('first')
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -805,16 +807,15 @@ class VideoFrameWidget(QWidget):
         # 首帧按钮
         self.first_frame_btn = PushButton("首帧", self)
         self.first_frame_btn.setCheckable(True)
-        self.first_frame_btn.setChecked(True)  # 默认选中首帧
         self.first_frame_btn.clicked.connect(lambda: self.set_frame_type('first'))
         frame_layout.addWidget(self.first_frame_btn)
-        
+
         # 尾帧按钮
         self.last_frame_btn = PushButton("尾帧", self)
         self.last_frame_btn.setCheckable(True)
         self.last_frame_btn.clicked.connect(lambda: self.set_frame_type('last'))
         frame_layout.addWidget(self.last_frame_btn)
-        
+
         # 具体时间帧按钮
         self.custom_frame_btn = PushButton("具体时间帧", self)
         self.custom_frame_btn.setCheckable(True)
@@ -897,15 +898,49 @@ class VideoFrameWidget(QWidget):
     def set_frame_type(self, frame_type):
         """设置帧类型"""
         self.frame_type = frame_type
-        
-        # 更新按钮状态
+
+        # 定义按钮样式
+        active_style = """
+            PushButton {
+                background-color: #0078d4;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 8px 16px;
+                min-width: 80px;
+            }
+            PushButton:hover {
+                background-color: #106ebe;
+            }
+        """
+        inactive_style = """
+            PushButton {
+                background-color: #f0f0f0;
+                color: #333333;
+                border: 1px solid #d0d0d0;
+                border-radius: 5px;
+                padding: 8px 16px;
+                min-width: 80px;
+            }
+            PushButton:hover {
+                background-color: #e0e0e0;
+                border: 1px solid #b0b0b0;
+            }
+        """
+
+        # 更新按钮状态和样式
         self.first_frame_btn.setChecked(frame_type == 'first')
+        self.first_frame_btn.setStyleSheet(active_style if frame_type == 'first' else inactive_style)
+
         self.last_frame_btn.setChecked(frame_type == 'last')
+        self.last_frame_btn.setStyleSheet(active_style if frame_type == 'last' else inactive_style)
+
         self.custom_frame_btn.setChecked(frame_type == 'custom')
-        
+        self.custom_frame_btn.setStyleSheet(active_style if frame_type == 'custom' else inactive_style)
+
         # 启用或禁用时间输入框
         self.time_input.setEnabled(frame_type == 'custom')
-        
+
         # 如果是自定义时间，更新时间戳
         if frame_type == 'custom':
             time_text = self.time_input.text()
@@ -1021,27 +1056,31 @@ class VideoFrameWidget(QWidget):
             InfoBar.error("FFmpeg未找到", "请先安装ffmpeg", parent=self)
             return
 
+        # 处理所有文件（无论之前的状态如何），支持重复提取不同帧
         for row in range(self.table.rowCount()):
-            if self.table.item(row, 1).text() == "未处理":
-                file_path = self.table.item(row, 0).data(Qt.UserRole)
+            file_path = self.table.item(row, 0).data(Qt.UserRole)
 
-                # 更新状态
-                status_item = self.create_non_editable_item("处理中")
-                status_item.setForeground(QColor("orange"))
-                self.table.setItem(row, 1, status_item)
+            # 检查文件是否正在处理中
+            if file_path in self.processing_files:
+                continue
 
-                # 添加到处理集合
-                self.processing_files.add(file_path)
+            # 更新状态为处理中
+            status_item = self.create_non_editable_item("处理中")
+            status_item.setForeground(QColor("orange"))
+            self.table.setItem(row, 1, status_item)
 
-                # 添加日志
-                frame_type_name = {'first': '首帧', 'last': '尾帧', 'custom': f'{self.timestamp}帧'}[self.frame_type]
-                self.add_log(f"开始提取{frame_type_name}: {os.path.basename(file_path)}")
+            # 添加到处理集合
+            self.processing_files.add(file_path)
 
-                # 创建工作线程
-                worker = VideoFrameWorker(file_path, output_dir, self.frame_type, self.timestamp)
-                worker.signals.finished.connect(self.on_processing_finished)
-                worker.signals.errno.connect(self.on_processing_error)
-                self.thread_pool.start(worker)
+            # 添加日志
+            frame_type_name = {'first': '首帧', 'last': '尾帧', 'custom': f'{self.timestamp}帧'}[self.frame_type]
+            self.add_log(f"开始提取{frame_type_name}: {os.path.basename(file_path)}")
+
+            # 创建工作线程
+            worker = VideoFrameWorker(file_path, output_dir, self.frame_type, self.timestamp)
+            worker.signals.finished.connect(self.on_processing_finished)
+            worker.signals.errno.connect(self.on_processing_error)
+            self.thread_pool.start(worker)
 
     def on_processing_finished(self, file_path, message):
         """处理完成回调"""
@@ -2741,7 +2780,7 @@ class InfoWidget(QWidget):
         # main_layout.setSpacing(50)
 
         # 标题
-        title_label = BodyLabel("  ASRTools v2.1.1", self)
+        title_label = BodyLabel("  ASRTools v2.1.2", self)
         title_label.setFont(QFont("Segoe UI", 30, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
@@ -2783,12 +2822,12 @@ class MainWindow(FluentWindow):
         # 音视频合并界面
         self.merge_media_widget = MergeMediaWidget()
         self.merge_media_widget.setObjectName("merge_media")
-        self.addSubInterface(self.merge_media_widget, FIF.LINK, '音视频合并')
+        self.addSubInterface(self.merge_media_widget, FIF.CAMERA, '音视频合并')
 
         # 视频帧提取界面
         self.video_frame_widget = VideoFrameWidget()
         self.video_frame_widget.setObjectName("video_frame")
-        self.addSubInterface(self.video_frame_widget, FIF.CAMERA, '视频帧提取')
+        self.addSubInterface(self.video_frame_widget, FIF.PHOTO, '视频帧提取')
 
         # 视频转换界面
         self.video_converter_widget = VideoConverterWidget()
