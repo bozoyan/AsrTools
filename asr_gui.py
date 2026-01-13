@@ -10,7 +10,7 @@ import webbrowser
 plugin_path = os.path.join(sys.prefix, 'Lib', 'site-packages', 'PyQt5', 'Qt5', 'plugins')
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
 
-from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSize, QThread, \
+from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSize, QThread, QTimer, \
     pyqtSignal
 from PyQt5.QtGui import QCursor, QColor, QFont, QIcon
 import requests
@@ -470,12 +470,14 @@ class SrtOptimizerWorker(QRunnable):
 
 
 class VideoFrameWorker(QRunnable):
-    """视频第一帧提取工作线程"""
+    """视频帧提取工作线程"""
 
-    def __init__(self, video_path, output_dir):
+    def __init__(self, video_path, output_dir, frame_type='first', timestamp='00:00:00'):
         super().__init__()
         self.video_path = video_path
         self.output_dir = output_dir
+        self.frame_type = frame_type  # 'first', 'last', 'custom'
+        self.timestamp = timestamp  # 具体时间戳，如 '00:00:10'
         self.signals = WorkerSignals()
 
     @Slot()
@@ -488,18 +490,43 @@ class VideoFrameWorker(QRunnable):
             # 确保输出目录存在
             Path(self.output_dir).mkdir(parents=True, exist_ok=True)
 
-            # 生成输出文件名
+            # 生成输出文件名和提取时间
             video_name = os.path.splitext(os.path.basename(self.video_path))[0]
-            output_path = os.path.join(self.output_dir, f"{video_name}.jpg")
+            
+            if self.frame_type == 'first':
+                suffix = "_首帧"
+                seek_time = '00:00:00'
+            elif self.frame_type == 'last':
+                suffix = "_尾帧"
+                # 获取视频总时长
+                cmd_duration = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                              '-of', 'default=noprint_wrappers=1:nokey=1', self.video_path]
+                result = subprocess.run(cmd_duration, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if result.returncode == 0:
+                    total_seconds = float(result.stdout.strip())
+                    # 减去1秒作为尾帧时间
+                    seek_time = str(max(0, total_seconds - 1))
+                    # 转换为 HH:MM:SS 格式
+                    hours = int(seek_time // 3600)
+                    minutes = int((seek_time % 3600) // 60)
+                    seconds = int(seek_time % 60)
+                    seek_time = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                else:
+                    seek_time = '00:00:00'
+            else:  # custom
+                suffix = f"_{self.timestamp}帧"
+                seek_time = self.timestamp
+            
+            output_path = os.path.join(self.output_dir, f"{video_name}{suffix}.jpg")
 
-            # ffmpeg命令提取第一帧
+            # ffmpeg命令提取指定帧
             cmd = [
                 'ffmpeg',
                 '-i', self.video_path,
                 '-vframes', '1',
                 '-q:v', '2',
                 '-y',
-                '-ss', '00:00:00',
+                '-ss', seek_time,
                 output_path
             ]
 
@@ -730,6 +757,8 @@ class VideoFrameWidget(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.frame_type = 'first'  # 默认提取首帧
+        self.timestamp = '00:00:00'  # 默认时间戳
         self.init_ui()
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(3)  # 同时最多处理3个视频
@@ -757,7 +786,8 @@ class VideoFrameWidget(QWidget):
         output_label = BodyLabel("输出目录:", self)
         output_label.setFixedWidth(70)
         self.output_input = LineEdit(self)
-        self.output_input.setPlaceholderText("选择图片保存目录")
+        self.output_input.setPlaceholderText("默认保存到 output 目录")
+        self.output_input.setText(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output'))
         self.output_input.setReadOnly(True)
         self.output_button = PushButton("选择目录", self)
         self.output_button.clicked.connect(self.select_output_dir)
@@ -766,6 +796,42 @@ class VideoFrameWidget(QWidget):
         output_layout.addWidget(self.output_button)
         layout.addLayout(output_layout)
 
+        # 帧选择区域
+        frame_label = BodyLabel("帧选择:", self)
+        layout.addWidget(frame_label)
+        
+        frame_layout = QHBoxLayout()
+        
+        # 首帧按钮
+        self.first_frame_btn = PushButton("首帧", self)
+        self.first_frame_btn.setCheckable(True)
+        self.first_frame_btn.setChecked(True)  # 默认选中首帧
+        self.first_frame_btn.clicked.connect(lambda: self.set_frame_type('first'))
+        frame_layout.addWidget(self.first_frame_btn)
+        
+        # 尾帧按钮
+        self.last_frame_btn = PushButton("尾帧", self)
+        self.last_frame_btn.setCheckable(True)
+        self.last_frame_btn.clicked.connect(lambda: self.set_frame_type('last'))
+        frame_layout.addWidget(self.last_frame_btn)
+        
+        # 具体时间帧按钮
+        self.custom_frame_btn = PushButton("具体时间帧", self)
+        self.custom_frame_btn.setCheckable(True)
+        self.custom_frame_btn.clicked.connect(lambda: self.set_frame_type('custom'))
+        frame_layout.addWidget(self.custom_frame_btn)
+        
+        # 时间输入框
+        self.time_input = LineEdit(self)
+        self.time_input.setPlaceholderText("00:00:10")
+        self.time_input.setMaximumWidth(100)
+        self.time_input.setEnabled(False)  # 默认禁用
+        self.time_input.textChanged.connect(self.on_time_changed)
+        frame_layout.addWidget(self.time_input)
+        
+        frame_layout.addStretch()
+        layout.addLayout(frame_layout)
+        
         # 文件列表表格
         table_label = BodyLabel("文件列表:", self)
         layout.addWidget(table_label)
@@ -827,6 +893,33 @@ class VideoFrameWidget(QWidget):
         if folder:
             self.output_input.setText(folder)
             self.update_process_button_state()
+    
+    def set_frame_type(self, frame_type):
+        """设置帧类型"""
+        self.frame_type = frame_type
+        
+        # 更新按钮状态
+        self.first_frame_btn.setChecked(frame_type == 'first')
+        self.last_frame_btn.setChecked(frame_type == 'last')
+        self.custom_frame_btn.setChecked(frame_type == 'custom')
+        
+        # 启用或禁用时间输入框
+        self.time_input.setEnabled(frame_type == 'custom')
+        
+        # 如果是自定义时间，更新时间戳
+        if frame_type == 'custom':
+            time_text = self.time_input.text()
+            if time_text:
+                self.timestamp = time_text
+        else:
+            self.timestamp = '00:00:00'
+    
+    def on_time_changed(self, text):
+        """时间输入框变化事件"""
+        if self.frame_type == 'custom' and text:
+            # 简单验证时间格式 HH:MM:SS
+            if len(text) == 8 and text.count(':') == 2:
+                self.timestamp = text
 
     def add_videos_from_folder(self, folder):
         """从文件夹添加所有视频文件"""
@@ -941,10 +1034,11 @@ class VideoFrameWidget(QWidget):
                 self.processing_files.add(file_path)
 
                 # 添加日志
-                self.add_log(f"开始处理: {os.path.basename(file_path)}")
+                frame_type_name = {'first': '首帧', 'last': '尾帧', 'custom': f'{self.timestamp}帧'}[self.frame_type]
+                self.add_log(f"开始提取{frame_type_name}: {os.path.basename(file_path)}")
 
                 # 创建工作线程
-                worker = VideoFrameWorker(file_path, output_dir)
+                worker = VideoFrameWorker(file_path, output_dir, self.frame_type, self.timestamp)
                 worker.signals.finished.connect(self.on_processing_finished)
                 worker.signals.errno.connect(self.on_processing_error)
                 self.thread_pool.start(worker)
@@ -2185,32 +2279,37 @@ class MergeMediaWidget(QWidget):
         self.thread_pool = QThreadPool()
         self.processing = False
         self.media_type = 'audio'  # 默认音频模式
+        
+        # JSON配置文件路径
+        self.config_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache')
+        os.makedirs(self.config_dir, exist_ok=True)
+        self.config_file = os.path.join(self.config_dir, 'merge_media_config.json')
+        
+        # 先初始化UI
         self.init_ui()
         self.setAcceptDrops(True)
+        
+        # UI初始化完成后再加载配置
+        self.load_config()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(20)
 
-        # 标题
-        title_label = BodyLabel("音视频合并", self)
-        title_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
-        layout.addWidget(title_label)
-
-        # 选项卡切换
+        # 选项卡切换（顶部）
         self.segmented = SegmentedWidget(self)
         self.segmented.addItem(routeKey='audio', text='音频合并', onClick=lambda: self.switch_mode('audio'))
         self.segmented.addItem(routeKey='video', text='视频合并', onClick=lambda: self.switch_mode('video'))
         self.segmented.setCurrentItem('audio')
         layout.addWidget(self.segmented)
 
-        # 文件列表区域
+        # 文件列表标签
         list_label = BodyLabel("源文件列表（可拖拽文件到此处添加）", self)
         list_label.setFont(QFont("Segoe UI", 14))
         layout.addWidget(list_label)
 
-        # 文件表格
+        # 文件表格（自适应高度）
         self.table = TableWidget(self)
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels(['文件名', '序号', '操作'])
@@ -2219,18 +2318,20 @@ class MergeMediaWidget(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.setEditTriggers(TableWidget.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
-        self.table.setDragDropMode(TableWidget.InternalMove)
         self.table.setSelectionBehavior(TableWidget.SelectRows)
-        self.table.setDragEnabled(True)
+        # 禁用内部拖拽，改用按钮上下移
+        self.table.setDragDropMode(TableWidget.DropOnly)
         self.table.setAcceptDrops(True)
         self.table.viewport().setAcceptDrops(True)
-        self.table.setDropIndicatorShown(True)
         # 设置拖拽行为
         self.table.dragEnterEvent = self.table_drag_enter_event
         self.table.dropEvent = self.table_drop_event
-        # 监听行移动事件以更新序号
-        self.table.model().rowsMoved.connect(self.update_sequence_numbers)
+        # 设置表格可以自适应高度
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.table)
+
+        # 占位符（让上面的表格可以自适应高度）
+        layout.addStretch()
 
         # 操作按钮区域
         button_layout = QHBoxLayout()
@@ -2238,6 +2339,14 @@ class MergeMediaWidget(QWidget):
         add_button = PushButton(FIF.ADD, "添加文件", self)
         add_button.clicked.connect(self.select_files)
         button_layout.addWidget(add_button)
+
+        up_button = PushButton(FIF.UP, "上移", self)
+        up_button.clicked.connect(self.move_up)
+        button_layout.addWidget(up_button)
+
+        down_button = PushButton(FIF.DOWN, "下移", self)
+        down_button.clicked.connect(self.move_down)
+        button_layout.addWidget(down_button)
 
         remove_button = PushButton(FIF.DELETE, "移除选中", self)
         remove_button.clicked.connect(self.remove_selected)
@@ -2277,10 +2386,7 @@ class MergeMediaWidget(QWidget):
         self.log_text.setMaximumHeight(150)
         layout.addWidget(self.log_text)
 
-        # 占位符
-        layout.addStretch()
-
-        # 开始合并按钮
+        # 开始合并按钮（最下方）
         self.merge_button = PushButton(FIF.SYNC, "开始合并", self)
         self.merge_button.setMinimumHeight(45)
         self.merge_button.clicked.connect(self.start_merge)
@@ -2295,6 +2401,124 @@ class MergeMediaWidget(QWidget):
         self.table.setRowCount(0)
         self.update_merge_button_state()
         self.add_log(f"切换到 {'音频' if mode == 'audio' else '视频'} 合并模式")
+        # 切换模式后重新加载对应模式的配置
+        self.load_config()
+    
+    def move_up(self):
+        """上移选中的文件"""
+        current_row = self.table.currentRow()
+        if current_row > 0:
+            # 交换文件
+            self.files[current_row], self.files[current_row - 1] = self.files[current_row - 1], self.files[current_row]
+            # 重建表格
+            self.refresh_table_from_files()
+            # 保存配置
+            self.save_config()
+            # 重新选中
+            self.table.selectRow(current_row - 1)
+            self.add_log(f"上移：{os.path.basename(self.files[current_row - 1])}")
+    
+    def move_down(self):
+        """下移选中的文件"""
+        current_row = self.table.currentRow()
+        if current_row >= 0 and current_row < len(self.files) - 1:
+            # 交换文件
+            self.files[current_row], self.files[current_row + 1] = self.files[current_row + 1], self.files[current_row]
+            # 重建表格
+            self.refresh_table_from_files()
+            # 保存配置
+            self.save_config()
+            # 重新选中
+            self.table.selectRow(current_row + 1)
+            self.add_log(f"下移：{os.path.basename(self.files[current_row + 1])}")
+    
+    def load_config(self):
+        """从JSON文件加载配置"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    
+                # 根据当前模式加载对应的文件列表
+                mode_key = 'audio' if self.media_type == 'audio' else 'video'
+                if mode_key in config and isinstance(config[mode_key], list):
+                    # 只保留仍然存在的文件
+                    valid_files = []
+                    for item in config[mode_key]:
+                        if os.path.exists(item['path']):
+                            valid_files.append(item['path'])
+                    
+                    self.files = valid_files
+                    
+                    # 重建表格
+                    self.refresh_table_from_files()
+                    
+                    if valid_files:
+                        self.add_log(f"已加载 {len(valid_files)} 个文件")
+                else:
+                    self.files = []
+                    self.table.setRowCount(0)
+        except Exception as e:
+            logging.error(f"加载配置文件失败: {str(e)}")
+            self.files = []
+            self.table.setRowCount(0)
+    
+    def save_config(self):
+        """保存配置到JSON文件"""
+        try:
+            config = {}
+            
+            # 保存音频文件列表
+            audio_files = []
+            if self.media_type == 'audio':
+                for index, file_path in enumerate(self.files):
+                    audio_files.append({
+                        'path': file_path,
+                        'sequence': index + 1
+                    })
+            config['audio'] = audio_files
+            
+            # 保存视频文件列表
+            video_files = []
+            if self.media_type == 'video':
+                for index, file_path in enumerate(self.files):
+                    video_files.append({
+                        'path': file_path,
+                        'sequence': index + 1
+                    })
+            config['video'] = video_files
+            
+            # 写入JSON文件
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+                
+        except Exception as e:
+            logging.error(f"保存配置文件失败: {str(e)}")
+    
+    def refresh_table_from_files(self):
+        """从files列表重建表格"""
+        # 清空表格
+        self.table.setRowCount(0)
+        
+        # 重新填充表格
+        for index, file_path in enumerate(self.files):
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            
+            # 文件名
+            name_item = QTableWidgetItem(os.path.basename(file_path))
+            name_item.setData(Qt.UserRole, file_path)
+            self.table.setItem(row, 0, name_item)
+            
+            # 序号
+            seq_item = QTableWidgetItem(str(index + 1))
+            seq_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 1, seq_item)
+            
+            # 操作按钮
+            op_button = PushButton(FIF.DELETE, "删除", self)
+            op_button.clicked.connect(lambda checked, r=row: self.remove_row(r))
+            self.table.setCellWidget(row, 2, op_button)
 
     def select_files(self):
         """选择文件对话框"""
@@ -2337,6 +2561,8 @@ class MergeMediaWidget(QWidget):
 
         self.update_merge_button_state()
         self.add_log(f"添加文件：{os.path.basename(file_path)}")
+        # 保存配置
+        self.save_config()
 
     def remove_row(self, row):
         """删除指定行"""
@@ -2344,8 +2570,10 @@ class MergeMediaWidget(QWidget):
             file_path = self.table.item(row, 0).data(Qt.UserRole)
             self.files.remove(file_path)
             self.table.removeRow(row)
-            self.update_sequence_numbers()
+            self.refresh_table_from_files()
             self.update_merge_button_state()
+            # 保存配置
+            self.save_config()
 
     def remove_selected(self):
         """移除选中的行"""
@@ -2361,8 +2589,10 @@ class MergeMediaWidget(QWidget):
             self.files.remove(file_path)
             self.table.removeRow(row)
 
-        self.update_sequence_numbers()
+        self.refresh_table_from_files()
         self.update_merge_button_state()
+        # 保存配置
+        self.save_config()
 
     def clear_files(self):
         """清空文件列表"""
@@ -2370,20 +2600,8 @@ class MergeMediaWidget(QWidget):
         self.table.setRowCount(0)
         self.update_merge_button_state()
         self.add_log("已清空文件列表")
-
-    def update_sequence_numbers(self):
-        """更新序号"""
-        for row in range(self.table.rowCount()):
-            seq_item = self.table.item(row, 1)
-            if seq_item:
-                seq_item.setText(str(row + 1))
-
-        # 同时更新files列表的顺序
-        new_files = []
-        for row in range(self.table.rowCount()):
-            file_path = self.table.item(row, 0).data(Qt.UserRole)
-            new_files.append(file_path)
-        self.files = new_files
+        # 保存配置
+        self.save_config()
 
     def browse_output(self):
         """浏览输出目录"""
@@ -2523,7 +2741,7 @@ class InfoWidget(QWidget):
         # main_layout.setSpacing(50)
 
         # 标题
-        title_label = BodyLabel("  ASRTools v2.1.0", self)
+        title_label = BodyLabel("  ASRTools v2.1.1", self)
         title_label.setFont(QFont("Segoe UI", 30, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
@@ -2562,6 +2780,11 @@ class MainWindow(FluentWindow):
         self.srt_optimizer_widget.setObjectName("srt_optimizer")
         self.addSubInterface(self.srt_optimizer_widget, FIF.SYNC, 'SRT 优化')
 
+        # 音视频合并界面
+        self.merge_media_widget = MergeMediaWidget()
+        self.merge_media_widget.setObjectName("merge_media")
+        self.addSubInterface(self.merge_media_widget, FIF.LINK, '音视频合并')
+
         # 视频帧提取界面
         self.video_frame_widget = VideoFrameWidget()
         self.video_frame_widget.setObjectName("video_frame")
@@ -2581,11 +2804,6 @@ class MainWindow(FluentWindow):
         self.voice_api_widget = VoiceApiWidget()
         self.voice_api_widget.setObjectName("voice_api")
         self.addSubInterface(self.voice_api_widget, FIF.SEND, '声音生成')
-
-        # 音视频合并界面
-        self.merge_media_widget = MergeMediaWidget()
-        self.merge_media_widget.setObjectName("merge_media")
-        self.addSubInterface(self.merge_media_widget, FIF.LINK, '音视频合并')
 
         # 关于开源 - 移动到导航栏最下方
         self.info_widget = InfoWidget()
