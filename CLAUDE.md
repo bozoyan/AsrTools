@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-**AsrTools** 是一个基于 **PyQt5** 和 **qfluentwidgets** 的音频语音识别(ASR)和字幕处理工具，当前版本为 **V2.0.0**。项目使用 Python 3.12 开发。
+**AsrTools** 是一个基于 **PyQt5** 和 **qfluentwidgets** 的音频语音识别(ASR)和字幕处理工具，当前版本为 **V2.0.0**。项目使用 Python 3.12 开发。激活 python 环境: source venv/bin/activate
+
+## 文档按版本号命名
+### 所有的安装文档，测试说明，开发总结，功能说明，完成报告，项目文件清单，任务完成总结之类的md文档全部按照版本号命名，保存到API文件夹内。不要放到项目根目录下。
 
 ### 核心功能
 
@@ -28,7 +31,8 @@ pip install -r requirements.txt
 
 ### 运行程序
 ```bash
-python asr_gui.py
+python asr_gui.py \
+  2>&1 | tee logs/output.log
 ```
 
 ### SRT优化处理
@@ -67,6 +71,7 @@ python main.py --srt_path input.srt --save_path output.srt
 - 实时状态更新和错误处理
 
 ## 开发指导
+
 
 ### 添加新ASR接口
 
