@@ -827,7 +827,7 @@ class VideoFrameWidget(QWidget):
         self.time_input.setPlaceholderText("00:00:10")
         self.time_input.setMaximumWidth(100)
         self.time_input.setEnabled(False)  # 默认禁用
-        self.time_input.textChanged.connect(self.on_time_changed)
+        self.time_input.editingFinished.connect(self.on_time_changed)
         frame_layout.addWidget(self.time_input)
         
         frame_layout.addStretch()
@@ -948,13 +948,29 @@ class VideoFrameWidget(QWidget):
                 self.timestamp = time_text
         else:
             self.timestamp = '00:00:00'
-    
-    def on_time_changed(self, text):
-        """时间输入框变化事件"""
+
+    def on_time_changed(self):
+        """时间输入框编辑完成事件"""
+        text = self.time_input.text().strip()
         if self.frame_type == 'custom' and text:
-            # 简单验证时间格式 HH:MM:SS
-            if len(text) == 8 and text.count(':') == 2:
-                self.timestamp = text
+            # 如果输入是纯数字（秒数），自动转换为 HH:MM:SS 格式
+            if ':' not in text and text.isdigit():
+                total_seconds = int(text)
+                hours = total_seconds // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+                formatted_time = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                self.time_input.setText(formatted_time)
+                self.timestamp = formatted_time
+            # 如果已经是 HH:MM:SS 格式，验证后使用
+            elif len(text) == 8 and text.count(':') == 2:
+                parts = text.split(':')
+                try:
+                    h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+                    if 0 <= h <= 23 and 0 <= m <= 59 and 0 <= s <= 59:
+                        self.timestamp = text
+                except ValueError:
+                    pass
 
     def add_videos_from_folder(self, folder):
         """从文件夹添加所有视频文件"""
