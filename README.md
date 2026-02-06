@@ -12,7 +12,7 @@
 
 **主界面截图示例：**
 
-<img src="resources/main_window-1.1.0.png" width="80%" alt="主界面">
+<img src="resources/AsrTools.png"  alt="主界面">
 
 
 ### 🖥️ **快速上手**
