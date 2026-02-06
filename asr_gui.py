@@ -2084,7 +2084,7 @@ class APIVoiceWorker(QRunnable):
     # 队列满错误码
     QUEUE_FULL_CODE = 30039
 
-    def __init__(self, api_keys_list, voice_color, target_text, voice_colors_data, task_row):
+    def __init__(self, api_keys_list, start_key_index, voice_color, target_text, voice_colors_data, task_row):
         """
         初始化工作线程
         :param api_keys_list: API密钥列表（支持自动切换）
