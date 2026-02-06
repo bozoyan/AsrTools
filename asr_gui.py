@@ -37,6 +37,7 @@ logging.basicConfig(
 class WorkerSignals(QObject):
     finished = Signal(str, str)
     errno = Signal(str, str)
+    progress = Signal(str, str)  # 用于显示进度信息
 
 
 class ASRWorker(QRunnable):
@@ -2068,6 +2069,467 @@ class VoiceApiWidget(QWidget):
         InfoBar.success('已删除', '该条历史记录已删除。', parent=self)
 
 
+class APIVoiceWorker(QRunnable):
+    """API语音合成工作线程 - 使用轮询机制"""
+
+    # 查询API URL
+    QUERY_URL = "https://api.bizyair.cn/w/v1/webapp/task/openapi/query"
+
+    # 超时设置（秒）
+    SUBMIT_TIMEOUT = 300  # 提交任务超时：5分钟（音频base64可能很大）
+    QUERY_TIMEOUT = 60    # 查询任务超时：1分钟
+    DOWNLOAD_TIMEOUT = 180  # 下载音频超时：3分钟
+
+    def __init__(self, api_key, voice_color, target_text, voice_colors_data):
+        super().__init__()
+        self.api_key = api_key
+        self.voice_color = voice_color
+        self.target_text = target_text
+        self.voice_colors_data = voice_colors_data
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self):
+        try:
+            import base64
+            import time
+
+            # 查找选中的音色数据
+            selected_voice = None
+            for voice in self.voice_colors_data:
+                if voice['title'] == self.voice_color:
+                    selected_voice = voice
+                    break
+
+            if not selected_voice:
+                raise Exception(f"未找到音色: {self.voice_color}")
+
+            # 读取音频文件并转为base64
+            audio_path = selected_voice['filename']
+            if not os.path.exists(audio_path):
+                raise Exception(f"音频文件不存在: {audio_path}")
+
+            with open(audio_path, 'rb') as f:
+                audio_base64 = base64.b64encode(f.read()).decode('utf-8')
+
+            # 第一步：提交任务
+            create_url = "https://api.bizyair.cn/w/v1/webapp/task/openapi/create"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}"
+            }
+            data = {
+                "web_app_id": 45578,
+                "suppress_preview_output": False,
+                "input_values": {
+                    "40:FB_Qwen3TTSVoiceClone.target_text": self.target_text,
+                    "24:LoadAudio.audio": audio_base64,
+                    "40:FB_Qwen3TTSVoiceClone.ref_text": selected_voice['content']
+                }
+            }
+
+            logging.info(f"[+]正在提交API任务: {create_url}")
+
+            # 显示提交进度倒计时
+            submit_total_time = 30  # 预计提交需要30秒内完成
+            for elapsed in range(submit_total_time):
+                remaining = submit_total_time - elapsed
+                self.signals.progress.emit("提交", f"正在提交任务... (预计剩余 {remaining}秒)")
+                time.sleep(1)
+
+            # 发送请求（使用更长的超时时间）
+            self.signals.progress.emit("提交", "正在上传音频数据，请稍候...")
+            response = requests.post(create_url, headers=headers, json=data, timeout=self.SUBMIT_TIMEOUT)
+            result = response.json()
+
+            logging.info(f"[+]API提交响应: {result}")
+
+            if result.get('request_id'):
+                request_id = result['request_id']
+                logging.info(f"[+]任务ID: {request_id}")
+
+                # 第二步：等待30秒后开始轮询
+                self.signals.progress.emit("等待", f"任务已提交，等待云端处理... (30秒)")
+                for i in range(30, 0, -5):
+                    time.sleep(5)
+                    self.signals.progress.emit("等待", f"等待处理中... ({i}秒)")
+
+                # 第三步：轮询查询结果
+                max_polls = 24  # 最多轮询24次 (2分钟)
+                poll_interval = 5  # 每5秒查询一次
+
+                for poll_count in range(max_polls):
+                    time.sleep(poll_interval)
+
+                    query_data = {"request_id": request_id}
+                    query_response = requests.post(self.QUERY_URL, headers=headers, json=query_data, timeout=self.QUERY_TIMEOUT)
+                    query_result = query_response.json()
+
+                    logging.info(f"[+]轮询查询 {poll_count + 1}: {query_result.get('status', 'Unknown')}")
+
+                    remaining_time = (max_polls - poll_count) * poll_interval
+                    self.signals.progress.emit("处理中", f"正在生成音频... (预计剩余 {remaining_time}秒)")
+
+                    if query_result.get('status') == 'Success':
+                        # 任务完成，获取音频URL
+                        if query_result.get('outputs'):
+                            audio_url = query_result['outputs'][0]['object_url']
+
+                            # 下载音频文件
+                            self.signals.progress.emit("下载", "正在下载音频文件...")
+                            download_response = requests.get(audio_url, timeout=self.DOWNLOAD_TIMEOUT)
+                            if download_response.status_code == 200:
+                                # 保存到output目录
+                                output_dir = Path("output")
+                                output_dir.mkdir(exist_ok=True)
+
+                                # 使用合成文本的前20个字符作为文件名
+                                safe_filename = "".join(c for c in self.target_text[:20] if c.isalnum() or c in (' ', '-', '_')).strip()
+                                if not safe_filename:
+                                    safe_filename = f"voice_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                                filename = f"{safe_filename}.mp3"
+                                save_path = output_dir / filename
+
+                                with open(save_path, 'wb') as f:
+                                    f.write(download_response.content)
+
+                                logging.info(f"[+]音频文件已保存到: {save_path}")
+                                # 返回 (本地路径, URL)
+                                self.signals.finished.emit(str(save_path), audio_url)
+                                return
+                            else:
+                                raise Exception(f"下载音频失败: {download_response.status_code}")
+                        else:
+                            raise Exception("API返回成功但无音频输出")
+                    elif query_result.get('status') == 'Failed':
+                        error_msg = query_result.get('message', '任务执行失败')
+                        raise Exception(f"API任务失败: {error_msg}")
+                    # 其他状态继续轮询
+
+                raise Exception("轮询超时，任务未在预期时间内完成")
+            else:
+                error_msg = result.get('message', 'API返回失败')
+                raise Exception(f"API提交失败: {error_msg}")
+
+        except requests.exceptions.Timeout as e:
+            error_msg = f"请求超时，请检查网络连接或稍后重试 (超时限制: {self.SUBMIT_TIMEOUT}秒)"
+            logging.error(error_msg)
+            self.signals.errno.emit("TIMEOUT_ERROR", error_msg)
+        except requests.exceptions.RequestException as e:
+            error_msg = f"调用API时网络错误: {e}"
+            logging.error(error_msg)
+            self.signals.errno.emit("NETWORK_ERROR", error_msg)
+        except Exception as e:
+            error_msg = f"处理API声音生成时发生错误: {e}"
+            logging.error(error_msg)
+            self.signals.errno.emit("UNKNOWN_ERROR", error_msg)
+
+
+class APIVoiceApiWidget(QWidget):
+    """API声音生成界面"""
+
+    HISTORY_FILE = Path("api_voice_history.json")
+
+    def __init__(self):
+        super().__init__()
+        self.voice_colors_data = []
+        self.history = []
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(1)
+        self.poll_timer = None
+        self.countdown_timer = None
+        self.current_request_id = None
+        self.load_voice_colors()
+        self.load_history()
+        self.init_ui()
+
+    def load_voice_colors(self):
+        """从slicer_opt.json加载音色数据"""
+        config_path = Path("slicer_opt.json")
+        if config_path.exists():
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    self.voice_colors_data = json.load(f)
+                logging.info(f"[+]加载了 {len(self.voice_colors_data)} 个音色")
+            except Exception as e:
+                logging.error(f"加载音色数据失败: {e}")
+                self.voice_colors_data = []
+        else:
+            logging.warning(f"音色配置文件不存在: {config_path}")
+            self.voice_colors_data = []
+
+    def load_history(self):
+        """加载历史记录"""
+        if self.HISTORY_FILE.exists():
+            try:
+                with open(self.HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    self.history = json.load(f)
+                for item in self.history:
+                    self.add_history_item_to_table(item['text'], item.get('local_path', ''), item.get('audio_url', ''))
+            except (IOError, json.JSONDecodeError) as e:
+                logging.error(f"加载历史记录失败: {e}")
+                self.history = []
+
+    def save_history(self):
+        """保存历史记录"""
+        try:
+            with open(self.HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.history, f, ensure_ascii=False, indent=4)
+        except IOError as e:
+            logging.error(f"保存历史记录失败: {e}")
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # 顶部一行：音色选择 + API密钥
+        top_layout = QHBoxLayout()
+
+        # 音色选择
+        voice_label = BodyLabel("音色:", self)
+        voice_label.setFixedWidth(50)
+        self.voice_combo = ComboBox(self)
+        self.voice_combo.addItems([voice['title'] for voice in self.voice_colors_data])
+        self.voice_combo.currentIndexChanged.connect(self.on_voice_changed)
+        top_layout.addWidget(voice_label)
+        top_layout.addWidget(self.voice_combo)
+
+        # 音色描述
+        self.voice_desc_label = BodyLabel("", self)
+        self.voice_desc_label.setStyleSheet("color: gray; font-size: 10px;")
+        self.voice_desc_label.setMaximumWidth(200)
+        top_layout.addWidget(self.voice_desc_label)
+
+        top_layout.addSpacing(20)
+
+        # API密钥
+        api_key_label = BodyLabel("API密钥:", self)
+        self.api_key_input = LineEdit(self)
+        self.api_key_input.setPlaceholderText("请输入Bizyair API密钥")
+        top_layout.addWidget(api_key_label)
+        top_layout.addWidget(self.api_key_input)
+
+        layout.addLayout(top_layout)
+
+        # 多行文本输入框（顶部）
+        self.text_input = TextEdit(self)
+        self.text_input.setPlaceholderText("在此输入需要合成语音的文本...")
+        self.text_input.setFixedHeight(120)
+        layout.addWidget(self.text_input)
+
+        # 状态显示标签
+        self.status_label = BodyLabel("", self)
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("color: #0078d4; font-size: 12px;")
+        layout.addWidget(self.status_label)
+
+        # 历史记录表格
+        history_label = BodyLabel("历史记录:", self)
+        layout.addWidget(history_label)
+
+        self.history_table = TableWidget(self)
+        self.history_table.setColumnCount(3)
+        self.history_table.setHorizontalHeaderLabels(['文本', 'URL/文件', '操作'])
+        self.history_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.history_table.customContextMenuRequested.connect(self.show_context_menu)
+        header = self.history_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.history_table.setWordWrap(True)
+        self.history_table.setMaximumHeight(200)
+        layout.addWidget(self.history_table)
+
+        # 声音生成按钮
+        self.generate_button = PushButton("生成声音", self)
+        self.generate_button.clicked.connect(self.generate_voice)
+        layout.addWidget(self.generate_button)
+
+        # 初始化音色描述
+        if self.voice_colors_data:
+            self.on_voice_changed(0)
+
+    def on_voice_changed(self, index):
+        """音色选择改变时的处理"""
+        if 0 <= index < len(self.voice_colors_data):
+            voice = self.voice_colors_data[index]
+            ref_text = voice['content']
+            if len(ref_text) > 25:
+                ref_text = ref_text[:25] + "..."
+            self.voice_desc_label.setText(f"参考: {ref_text}")
+
+    def add_history_item_to_table(self, text, local_path, audio_url):
+        """添加历史记录到表格"""
+        row_count = self.history_table.rowCount()
+        self.history_table.insertRow(row_count)
+
+        # 文本
+        text_item = QTableWidgetItem(text)
+        text_item.setFlags(text_item.flags() & ~Qt.ItemIsEditable)
+        self.history_table.setItem(row_count, 0, text_item)
+
+        # URL/本地路径
+        url_item = QTableWidgetItem(audio_url or local_path)
+        url_item.setFlags(url_item.flags() & ~Qt.ItemIsEditable)
+        url_item.setData(Qt.UserRole, {'local_path': local_path, 'audio_url': audio_url})
+        self.history_table.setItem(row_count, 1, url_item)
+
+        # 操作按钮
+        play_button = PushButton(FIF.PLAY, "播放")
+        play_button.clicked.connect(lambda _, r=row_count: self.play_audio(r))
+        self.history_table.setCellWidget(row_count, 2, play_button)
+        self.history_table.resizeRowsToContents()
+
+    def play_audio(self, row):
+        """播放音频"""
+        item = self.history_table.item(row, 1)
+        data = item.data(Qt.UserRole)
+        local_path = data.get('local_path', '')
+
+        if local_path and os.path.exists(local_path):
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(local_path)
+                elif platform.system() == "Darwin":
+                    subprocess.Popen(["open", local_path])
+                else:
+                    subprocess.Popen(["xdg-open", local_path])
+            except Exception as e:
+                InfoBar.error('播放失败', f'无法播放文件: {e}', parent=self)
+        elif data.get('audio_url'):
+            # 如果有URL但本地文件不存在，尝试打开URL
+            try:
+                webbrowser.open(data['audio_url'])
+            except Exception as e:
+                InfoBar.error('打开失败', f'无法打开URL: {e}', parent=self)
+        else:
+            InfoBar.warning('文件不存在', '音频文件不存在。', parent=self)
+
+    def show_context_menu(self, pos):
+        """显示右键菜单"""
+        row = self.history_table.rowAt(pos.y())
+        if row < 0:
+            return
+
+        menu = RoundMenu(parent=self)
+        play_action = Action(FIF.PLAY, '播放音频')
+        open_file_action = Action(FIF.FOLDER, '打开文件')
+        open_url_action = Action(FIF.LINK, '打开URL')
+        delete_action = Action(FIF.DELETE, '删除此条记录')
+
+        menu.addActions([play_action, open_file_action, open_url_action, delete_action])
+
+        play_action.triggered.connect(lambda: self.play_audio(row))
+        open_file_action.triggered.connect(lambda: self.open_file(row))
+        open_url_action.triggered.connect(lambda: self.open_url(row))
+        delete_action.triggered.connect(lambda: self.delete_history_item(row))
+
+        menu.exec(QCursor.pos())
+
+    def open_file(self, row):
+        """打开文件所在目录"""
+        item = self.history_table.item(row, 1)
+        data = item.data(Qt.UserRole)
+        local_path = data.get('local_path', '')
+
+        if local_path and os.path.exists(local_path):
+            try:
+                directory = os.path.dirname(local_path)
+                if platform.system() == "Windows":
+                    os.startfile(directory)
+                elif platform.system() == "Darwin":
+                    subprocess.Popen(["open", directory])
+                else:
+                    subprocess.Popen(["xdg-open", directory])
+            except Exception as e:
+                InfoBar.error('打开失败', f'无法打开目录: {e}', parent=self)
+        else:
+            InfoBar.warning('文件不存在', '本地文件不存在。', parent=self)
+
+    def open_url(self, row):
+        """打开音频URL"""
+        item = self.history_table.item(row, 1)
+        data = item.data(Qt.UserRole)
+        audio_url = data.get('audio_url', '')
+
+        if audio_url:
+            try:
+                webbrowser.open(audio_url)
+            except Exception as e:
+                InfoBar.error('打开失败', f'无法打开URL: {e}', parent=self)
+        else:
+            InfoBar.warning('URL不存在', '没有保存的URL。', parent=self)
+
+    def delete_history_item(self, row):
+        """删除历史记录"""
+        self.history_table.removeRow(row)
+        if row < len(self.history):
+            del self.history[row]
+            self.save_history()
+        InfoBar.success('已删除', '该条历史记录已删除。', parent=self)
+
+    def generate_voice(self):
+        text = self.text_input.toPlainText().strip()
+        if not text:
+            InfoBar.warning('内容为空', '请输入需要合成的文本。', parent=self)
+            return
+
+        api_key = self.api_key_input.text().strip()
+        if not api_key:
+            InfoBar.warning('API密钥为空', '请输入API密钥。', parent=self)
+            return
+
+        if not self.voice_colors_data:
+            InfoBar.warning('音色数据为空', '未找到音色配置数据。', parent=self)
+            return
+
+        voice_color = self.voice_combo.currentText()
+
+        self.generate_button.setText("生成中...")
+        self.generate_button.setEnabled(False)
+        self.status_label.setText("正在提交任务...")
+
+        worker = APIVoiceWorker(api_key, voice_color, text, self.voice_colors_data)
+        worker.signals.progress.connect(self.on_generation_progress)
+        worker.signals.finished.connect(self.on_generation_finished)
+        worker.signals.errno.connect(self.on_generation_error)
+        self.thread_pool.start(worker)
+
+    def on_generation_progress(self, status, message):
+        """更新生成进度"""
+        self.status_label.setText(message)
+
+    def on_generation_finished(self, local_path, audio_url):
+        """生成完成回调"""
+        InfoBar.success('生成成功', f'音频文件已保存', parent=self)
+        self.generate_button.setText("生成声音")
+        self.generate_button.setEnabled(True)
+        self.status_label.setText("")
+
+        text = self.text_input.toPlainText()
+
+        # 添加到历史记录
+        new_history_item = {
+            'text': text,
+            'local_path': local_path,
+            'audio_url': audio_url,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.history.insert(0, new_history_item)
+        self.save_history()
+
+        # 刷新表格
+        self.history_table.setRowCount(0)
+        for item in self.history:
+            self.add_history_item_to_table(item['text'], item.get('local_path', ''), item.get('audio_url', ''))
+
+    def on_generation_error(self, _, error_message):
+        """生成错误回调"""
+        InfoBar.error('生成失败', error_message, parent=self)
+        self.generate_button.setText("生成声音")
+        self.generate_button.setEnabled(True)
+        self.status_label.setText("")
+
+
 class SrtOptimizerWidget(QWidget):
     """SRT优化界面"""
     def __init__(self):
@@ -2859,6 +3321,11 @@ class MainWindow(FluentWindow):
         self.voice_api_widget = VoiceApiWidget()
         self.voice_api_widget.setObjectName("voice_api")
         self.addSubInterface(self.voice_api_widget, FIF.SEND, '声音生成')
+
+        # API声音生成界面
+        self.api_voice_api_widget = APIVoiceApiWidget()
+        self.api_voice_api_widget.setObjectName("api_voice_api")
+        self.addSubInterface(self.api_voice_api_widget, FIF.CODE, 'API声音生成')
 
         # 关于开源 - 移动到导航栏最下方
         self.info_widget = InfoWidget()

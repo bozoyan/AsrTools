@@ -12,6 +12,9 @@ API
 yons启动.command
 启动.command
 
+gpt_sovits_history.json
+api_voice_history.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
