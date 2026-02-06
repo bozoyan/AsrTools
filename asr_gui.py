@@ -3476,7 +3476,7 @@ class InfoWidget(QWidget):
         # main_layout.setSpacing(50)
 
         # 标题
-        title_label = BodyLabel("  ASRTools v2.1.2", self)
+        title_label = BodyLabel("  ASRTools v2.1.9", self)
         title_label.setFont(QFont("Segoe UI", 30, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
@@ -3550,8 +3550,9 @@ class MainWindow(FluentWindow):
         self.info_widget.setObjectName("info")
         self.addSubInterface(self.info_widget, FIF.GITHUB, '关于开源')
 
+        # 主窗口大小
         self.navigationInterface.setExpandWidth(200)
-        self.resize(800, 600)
+        self.resize(1080, 780)
 
         self.update_checker = UpdateCheckerThread(self)
         self.update_checker.msg.connect(self.show_msg)
