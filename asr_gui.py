@@ -6,12 +6,10 @@ import subprocess
 import sys
 import webbrowser
 
-# FIX: 修复中文路径报错 https://github.com/bozoyan/AsrTools/issues/18  设置QT_QPA_PLATFORM_PLUGIN_PATH 
 plugin_path = os.path.join(sys.prefix, 'Lib', 'site-packages', 'PyQt5', 'Qt5', 'plugins')
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
 
-from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSize, QThread, QTimer, \
-    pyqtSignal
+from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSize, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QCursor, QColor, QFont, QIcon
 import requests
 from datetime import datetime
@@ -2395,8 +2393,10 @@ class APIVoiceApiWidget(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
 
-        # 顶部一行：音色选择 + 密钥文件
-        top_layout = QHBoxLayout()
+        # 顶部一行：音色选择 + 密钥文件 - 固定高度80px
+        top_widget = QWidget(self)
+        top_widget.setFixedHeight(80)
+        top_layout = QHBoxLayout(top_widget)
 
         # 音色选择
         voice_label = BodyLabel("音色:", self)
@@ -2432,12 +2432,12 @@ class APIVoiceApiWidget(QWidget):
         self.key_status_label.setStyleSheet("color: #0078d4; font-size: 10px;")
         top_layout.addWidget(self.key_status_label)
 
-        layout.addLayout(top_layout)
+        layout.addWidget(top_widget)
 
-        # 多行文本输入框（顶部）
+        # 多行文本输入框 - 高度200px
         self.text_input = TextEdit(self)
         self.text_input.setPlaceholderText("在此输入需要合成语音的文本...")
-        self.text_input.setFixedHeight(100)
+        self.text_input.setFixedHeight(200)
         layout.addWidget(self.text_input)
 
         # 状态显示标签
@@ -2446,10 +2446,11 @@ class APIVoiceApiWidget(QWidget):
         self.status_label.setStyleSheet("color: #0078d4; font-size: 12px;")
         layout.addWidget(self.status_label)
 
-        # 任务记录表格（任务模式）
+        # 任务记录表格标签
         task_label = BodyLabel("任务记录:", self)
         layout.addWidget(task_label)
 
+        # 任务记录表格 - 自适应高度显示任务数据
         self.history_table = TableWidget(self)
         self.history_table.setColumnCount(4)
         self.history_table.setHorizontalHeaderLabels(['文本', '状态', '文件', '操作'])
@@ -2461,10 +2462,11 @@ class APIVoiceApiWidget(QWidget):
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.history_table.setWordWrap(True)
-        self.history_table.setMaximumHeight(200)
+        # 使用弹性策略让表格自适应高度
+        self.history_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.history_table)
 
-        # 声音生成按钮（支持多次点击）
+        # 声音生成按钮（支持多次点击）- 固定在最下方
         self.generate_button = PushButton("生成声音", self)
         self.generate_button.clicked.connect(self.generate_voice)
         layout.addWidget(self.generate_button)
@@ -3541,7 +3543,7 @@ class MainWindow(FluentWindow):
         # API声音生成界面
         self.api_voice_api_widget = APIVoiceApiWidget()
         self.api_voice_api_widget.setObjectName("api_voice_api")
-        self.addSubInterface(self.api_voice_api_widget, FIF.CODE, 'API声音生成')
+        self.addSubInterface(self.api_voice_api_widget, FIF.MICROPHONE, 'API声音生成')
 
         # 关于开源 - 移动到导航栏最下方
         self.info_widget = InfoWidget()
