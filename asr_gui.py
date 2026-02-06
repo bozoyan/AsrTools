@@ -2088,6 +2088,7 @@ class APIVoiceWorker(QRunnable):
         """
         初始化工作线程
         :param api_keys_list: API密钥列表（支持自动切换）
+        :param start_key_index: 起始密钥索引（从全局索引继续，避免冲突）
         :param voice_color: 音色名称
         :param target_text: 目标文本
         :param voice_colors_data: 音色数据
@@ -2095,7 +2096,7 @@ class APIVoiceWorker(QRunnable):
         """
         super().__init__()
         self.api_keys_list = api_keys_list  # 完整的API密钥列表
-        self.current_key_index = 0  # 当前使用的密钥索引
+        self.current_key_index = start_key_index  # 从指定索引开始，避免从头开始
         self.voice_color = voice_color
         self.target_text = target_text
         self.voice_colors_data = voice_colors_data
@@ -2155,7 +2156,7 @@ class APIVoiceWorker(QRunnable):
                 logging.info(f"[+]尝试提交任务 (密钥 {self.current_key_index + 1}/{len(self.api_keys_list)})")
 
                 # 发送请求
-                self.signals.progress.emit(self.task_row, "提交", f"正在提交任务... (密钥 {self.current_key_index + 1}/{len(self.api_keys_list)})")
+                self.signals.progress.emit(self.task_row, "提交", "正在提交任务...")
                 response = requests.post(self.CREATE_URL, headers=headers, json=data, timeout=self.SUBMIT_TIMEOUT)
                 result = response.json()
 
@@ -2167,7 +2168,7 @@ class APIVoiceWorker(QRunnable):
                     self.current_key_index = (self.current_key_index + 1) % len(self.api_keys_list)
                     retry_msg = result.get('message', '队列已满')
                     logging.info(f"[+]队列满，切换密钥重试: {retry_msg}")
-                    self.signals.progress.emit(self.task_row, "队列满", f"队列已满，切换密钥 ({retry_count + 1}/{max_retries})")
+                    self.signals.progress.emit(self.task_row, "队列满", f"队列已满，重试中 ({retry_count + 1}/{max_retries})")
                     time.sleep(1)  # 短暂等待后重试
                     continue
 
@@ -2176,7 +2177,41 @@ class APIVoiceWorker(QRunnable):
                     request_id = result['request_id']
                     logging.info(f"[+]任务ID: {request_id}")
                     self.signals.progress.emit(self.task_row, "提交", "任务提交成功")
-                    break  # 成功提交，退出重试循环
+
+                    # 检查任务是否已经完成（status == 'Success'）
+                    if result.get('status') == 'Success' and result.get('outputs'):
+                        # 任务已完成，直接下载音频
+                        audio_url = result['outputs'][0]['object_url']
+                        output_ext = result['outputs'][0].get('output_ext', '.mp3')  # 获取实际文件扩展名
+                        logging.info(f"[+]任务已完成，音频URL: {audio_url}")
+                        logging.info(f"[+]文件格式: {output_ext}")
+
+                        # 下载音频文件
+                        self.signals.progress.emit(self.task_row, "下载", "正在下载音频文件...")
+                        download_response = requests.get(audio_url, timeout=self.DOWNLOAD_TIMEOUT)
+                        if download_response.status_code == 200:
+                            # 保存到output目录
+                            output_dir = Path("output")
+                            output_dir.mkdir(exist_ok=True)
+
+                            # 使用合成文本的前20个字符作为文件名
+                            safe_filename = "".join(c for c in self.target_text[:20] if c.isalnum() or c in (' ', '-', '_')).strip()
+                            if not safe_filename:
+                                safe_filename = f"voice_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                            filename = f"{safe_filename}{output_ext}"  # 使用实际扩展名
+                            save_path = output_dir / filename
+
+                            with open(save_path, 'wb') as f:
+                                f.write(download_response.content)
+
+                            logging.info(f"[+]音频文件已保存到: {save_path}")
+                            # 返回 (本地路径, URL)
+                            self.signals.finished.emit(str(save_path), audio_url)
+                            return
+                        else:
+                            raise Exception(f"下载音频失败: {download_response.status_code}")
+
+                    break  # 成功提交但任务未完成，退出重试循环进入轮询
                 else:
                     # 其他错误，不再重试
                     error_msg = result.get('message', 'API返回失败')
@@ -2212,6 +2247,9 @@ class APIVoiceWorker(QRunnable):
                     # 任务完成，获取音频URL
                     if query_result.get('outputs'):
                         audio_url = query_result['outputs'][0]['object_url']
+                        output_ext = query_result['outputs'][0].get('output_ext', '.mp3')  # 获取实际文件扩展名
+                        logging.info(f"[+]音频URL: {audio_url}")
+                        logging.info(f"[+]文件格式: {output_ext}")
 
                         # 下载音频文件
                         self.signals.progress.emit(self.task_row, "下载", "正在下载音频文件...")
@@ -2225,7 +2263,7 @@ class APIVoiceWorker(QRunnable):
                             safe_filename = "".join(c for c in self.target_text[:20] if c.isalnum() or c in (' ', '-', '_')).strip()
                             if not safe_filename:
                                 safe_filename = f"voice_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                            filename = f"{safe_filename}.mp3"
+                            filename = f"{safe_filename}{output_ext}"  # 使用实际扩展名
                             save_path = output_dir / filename
 
                             with open(save_path, 'wb') as f:
@@ -2619,8 +2657,12 @@ class APIVoiceApiWidget(QWidget):
         self.active_tasks += 1
         self.update_status_display()
 
-        # 启动工作线程（传递完整的API密钥列表和任务行号）
-        worker = APIVoiceWorker(self.api_keys, voice_color, text, self.voice_colors_data, task_row)
+        # 获取当前密钥索引，并更新到下一个（避免所有任务都从密钥1开始）
+        start_key_index = self.current_key_index
+        self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+
+        # 启动工作线程（传递完整的API密钥列表、起始密钥索引和任务行号）
+        worker = APIVoiceWorker(self.api_keys, start_key_index, voice_color, text, self.voice_colors_data, task_row)
         worker.signals.progress.connect(self.on_task_progress)
         worker.signals.finished.connect(lambda lp, au: self.on_task_finished(task_row, lp, au))
         worker.signals.errno.connect(lambda err: self.on_task_error(task_row, err))
